@@ -1,0 +1,313 @@
+---
+title: "p8105_hw6_mz3084"
+author: "Meitong Zhou"
+date: "2024-11-30"
+output: github_document
+---
+
+```{r}
+library(tidyverse)
+library(rnoaa)
+library(broom)
+library(modelr)
+```
+
+
+Question 1
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+```{r}
+bootstrap_function = function(data, n_bootstrap = 5000) {
+  r_squared_values = numeric(n_bootstrap)
+  log_beta_product_values = numeric(n_bootstrap)
+  
+  for (i in 1:n_bootstrap) {
+    # sample with replacement from the data and use nrow(data) to get the total number of rows
+    boot_sample = data |>
+      slice_sample(n = nrow(data), replace = TRUE)
+    
+    # do the regression
+    model = lm(tmax ~ tmin, data = boot_sample)
+    
+    # get R^2
+    r_squared_values[i] = glance(model)$r.squared
+    
+    # get β0 和 β1
+    beta_coefficients = coef(model)
+    beta_0 = beta_coefficients[1]
+    beta_1 = beta_coefficients[2]
+    
+    # get log(β0 * β1)
+    log_beta_product_values[i] = log(abs(beta_0 * beta_1))
+  }
+  
+  return(list(r_squared = r_squared_values, log_beta_product = log_beta_product_values))
+}
+```
+
+```{r}
+set.seed(123) # make sure that the result gonne be repeated
+bootstrap_results = bootstrap_function(weather_df)
+
+# get the result
+r_squared_values = bootstrap_results$r_squared
+log_beta_product_values = bootstrap_results$log_beta_product
+
+# get the confidence intervel
+r_squared_ci = quantile(r_squared_values, probs = c(0.025, 0.975))
+log_beta_product_ci = quantile(log_beta_product_values, probs = c(0.025, 0.975))
+
+print(paste("R-squared 95% CI:", paste(round(r_squared_ci, 3), collapse = " - ")))
+print(paste("log(β0 * β1) 95% CI:", paste(round(log_beta_product_ci, 3), collapse = " - ")))
+```
+
+
+```{r}
+# distribution plot
+# R-squared distribution
+ggplot(data.frame(r_squared = r_squared_values), aes(x = r_squared)) +
+  geom_histogram(binwidth = 0.01, fill = "blue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Bootstrap Distribution of R-squared", x = "R-squared", y = "Frequency")
+
+# log(β0 * β1) dist
+ggplot(data.frame(log_beta_product = log_beta_product_values), aes(x = log_beta_product)) +
+  geom_histogram(binwidth = 0.05, fill = "red", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Bootstrap Distribution of log(β0 * β1)", x = "log(β0 * β1)", y = "Frequency")
+```
+R^2:
+The distribution of R^2 is concentrated between about 0.89 and 0.93, with a peak near 0.91. Since R^2 is close to 1, it shows that the linear relationship between the independent variable and the dependent variable fits very well.
+
+log(β0 * β1):
+The distribution of log(β0 * β1) is concentrated between 1.96 and 2.05, with a peak near 2.00,
+
+
+Question 2
+
+```{r}
+homicide_data = read.csv("homicide-data (1).csv")
+head(homicide_data)
+```
+
+
+```{r}
+# change disposition into dummy variable resolved
+homicide_data = homicide_data |>
+  mutate(resolved = ifelse(disposition %in% c("Closed without arrest", "Closed by arrest"), 1, 0))
+```
+
+
+```{r}
+head(homicide_data)
+```
+
+
+```{r}
+# Create city_state variable and clean data
+homicide_data = homicide_data |>
+  filter(victim_race %in% c("White", "Black")) |>  
+  filter(!city %in% c("Dallas", "Tulsa")) |>     
+  mutate(victim_age = as.numeric(victim_age),       
+         city_state = paste(city, state, sep = ", ")) 
+
+
+```
+
+```{r}
+# Filter for Baltimore, MD
+baltimore_data = homicide_data |>
+  filter(city_state == "Baltimore, MD")
+```
+
+
+```{r}
+# Fit logistic regression model
+model_baltimore = glm(resolved ~ victim_age + victim_sex + victim_race, 
+                       data = baltimore_data, 
+                       family = binomial)
+summary_baltimore = broom::tidy(model_baltimore, exponentiate = TRUE, conf.int = TRUE)
+
+
+print(summary_baltimore)
+```
+
+```{r}
+nested_data = homicide_data %>%
+  group_by(city_state) %>%
+  nest()
+
+print(nested_data) 
+```
+
+```{r}
+nested_data = nested_data |>
+  mutate(
+    data = map(data, ~filter(.x, !is.na(victim_age) & !is.na(victim_sex) & !is.na(victim_race)))
+  )
+```
+
+
+
+```{r}
+city_models = nested_data |>
+  mutate(
+    model = map(data, ~glm(resolved ~ victim_age + victim_sex + victim_race, 
+                           data = .x, family = binomial)),
+    results = map(model, ~broom::tidy(.x, exponentiate = TRUE, conf.int = TRUE))
+  ) |>
+  unnest(results)
+```
+
+
+
+```{r}
+odds_ratios = city_models |>
+  filter(term == "victim_sexMale") |>
+  select(city_state, estimate, conf.low, conf.high)
+
+# plot
+ggplot(odds_ratios, aes(x = reorder(city_state, estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  coord_flip() +
+  labs(title = "The odds of solving crimes for male victims and female victims in each city",
+       x = "Cities",
+       y = "Odds ratio (OR) and confidence interval") +
+  theme_minimal(base_size = 8) 
+```
+```{r}
+library(dplyr)
+```
+
+```{r}
+odds_ratios = odds_ratios |> 
+  arrange(desc(estimate))
+head(odds_ratios)
+
+```
+Fresno, CA has the highest OR (1.13), indicating that the odds of solving crimes are relatively higher for male victims compared to female victims. However, the confidence interval (0.45–2.65) crosses 1, suggesting that this result is not statistically significant. Similar trends are observed in Minneapolis, MN and Stockton, CA, where OR values exceed 1, but wide confidence intervals reduce confidence in the estimates.
+
+
+Question 3
+
+
+```{r}
+birthweight = read.csv("birthweight.csv")
+head(birthweight)
+```
+
+```{r}
+birthweight = read.csv("birthweight.csv")
+
+
+birthweight = birthweight |>
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    mrace = factor(mrace),
+    frace = factor(frace),
+    malform = factor(malform),
+    smoken = as.numeric(smoken)
+  )
+
+
+summary(birthweight)
+
+
+birthweight = birthweight |>
+  drop_na()
+```
+
+```{r}
+# use all variable to make the linear regression
+model_full = lm(bwt ~ ., data = birthweight)
+summary(model_full)
+```
+
+
+
+
+```{r}
+#  birth and gestational age
+model_simple = lm(bwt ~ blength + gaweeks, data = birthweight)
+summary(model_simple)
+```
+```{r}
+# head circumference, length, sex, and all interactions
+model_interactions = lm(bwt ~ bhead * blength * babysex, data = birthweight)
+summary(model_interactions)
+```
+
+```{r}
+cross_validate = function(data, n_splits = 5) {
+  set.seed(123)  
+  results = map(1:n_splits, ~{
+    
+    train_index = sample(1:nrow(data), size = 0.8 * nrow(data))
+    train_data = data[train_index, ]
+    test_data = data[-train_index, ]
+    
+
+    full_model = lm(bwt ~ ., data = train_data)
+    simple_model = lm(bwt ~ blength + gaweeks, data = train_data)
+    interactions_model = lm(bwt ~ bhead * blength * babysex, data = train_data)
+    
+    # get MSE
+    full_mse = mean((test_data$bwt - predict(full_model, newdata = test_data))^2)
+    simple_mse = mean((test_data$bwt - predict(simple_model, newdata = test_data))^2)
+    interactions_mse = mean((test_data$bwt - predict(interactions_model, newdata = test_data))^2)
+    
+    
+    list(full_mse = full_mse, simple_mse = simple_mse, interactions_mse = interactions_mse)
+  })
+  
+  
+  mse_df = map_dfr(results, ~as.data.frame(.))
+  return(mse_df)
+}
+
+
+cv_results = cross_validate(birthweight, n_splits = 5)
+
+
+cv_summary = cv_results |>
+  summarise(
+    full_model_mse = mean(full_mse),
+    simple_model_mse = mean(simple_mse),
+    interactions_model_mse = mean(interactions_mse)
+  )
+
+print(cv_summary)
+```
+The full model has the lowest Mean Squared Error (MSE) at 74,031.84, indicating it provides the most accurate predictions among the three models.The interactions model, which includes interaction terms (bhead * blength * babysex), performs better than the simple model but worse than the full model, with an MSE of 83,440.46. The simple model, which only uses blength and gaweeks, has the highest MSE at 113,167, suggesting it is the least accurate.
+
+
+```{r}
+birthweight = birthweight |>
+  add_predictions(model_full) |>
+  add_residuals(model_full)
+
+
+ggplot(birthweight, aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Residuals vs Predicted Values",
+    x = "Predicted Birthweight (grams)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+The residuals are scattered around the red dashed line (y = 0), which is desirable as it suggests that the errors are centered around zero.However, the spread of residuals is not completely uniform across the range of predicted birthweight values, indicating potential heteroscedasticity.
